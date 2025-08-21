@@ -90,7 +90,6 @@ Mouse support is enabled for convenience.
 - **Color output**: devmux sets `FORCE_COLOR=1`, `CLICOLOR=1`, `CLICOLOR_FORCE=1`, and `TERM=xterm-256color` for spawned processes to encourage colorized output.
 - **Startup**: processes are launched shortly after the UI initializes so panes are ready to receive output immediately.
 - **Header indicators**: the top status line shows the focused pane name and the current states of follow, borders, and dividers.
-- **Borders/Dividers**: panes start borderless with a single-line divider between them to keep clipboard copies clean in tmux; toggle with `b` and `d`.
 - **Shutdown**:
   - POSIX (macOS/Linux): sends signals to the child process group (SIGTERM, then SIGKILL after ~2s)
   - Windows: falls back to killing the child process
