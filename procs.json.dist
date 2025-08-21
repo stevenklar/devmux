@@ -1,0 +1,17 @@
+{
+  "processes": [
+    {
+      "name": "Temporal",
+      "cmd": "temporal",
+      "args": ["server", "start-dev"],
+      "follow": true
+    },
+    {
+      "name": "Some App",
+      "cmd": "some-app",
+      "args": ["run", "dev"],
+      "follow": true
+    }
+  ]
+}
+
