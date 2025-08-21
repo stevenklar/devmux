@@ -1,4 +1,6 @@
 {
+  "borders": true,
+  "dividers": true,
   "processes": [
     {
       "name": "Temporal",

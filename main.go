@@ -20,11 +20,13 @@ import (
 )
 
 type Proc struct {
-	Name   string
-	Dir    string
-	Cmd    *exec.Cmd
-	View   *tview.TextView
-	Follow bool
+	Name      string
+	Dir       string
+	Cmd       *exec.Cmd
+	View      *tview.TextView
+	Container *tview.Frame
+	Follow    bool
+	Argv      []string
 }
 
 type procSpec struct {
@@ -37,6 +39,8 @@ type procSpec struct {
 
 type procConfig struct {
 	Processes []procSpec `json:"processes"`
+	Borders   bool       `json:"borders"`
+	Dividers  bool       `json:"dividers"`
 }
 
 type lockingWriter struct {
@@ -50,7 +54,13 @@ func (l *lockingWriter) Write(b []byte) (int, error) {
 	return l.w.Write(b)
 }
 
-func loadProcSpecs() ([]procSpec, error) {
+// UI preferences (runtime toggles)
+var (
+	useBorders  = true
+	useDividers = true
+)
+
+func loadConfig() (*procConfig, error) {
 	wd, _ := os.Getwd()
 	path := filepath.Join(wd, "procs.json")
 	f, err := os.Open(path)
@@ -62,19 +72,21 @@ func loadProcSpecs() ([]procSpec, error) {
 	if err := json.NewDecoder(f).Decode(&cfg); err != nil {
 		return nil, err
 	}
-	return cfg.Processes, nil
+	return &cfg, nil
 }
 
 func startProc(app *tview.Application, p *Proc, argv ...string) error {
-	p.View.SetTitle(p.Name).SetBorder(true)
+	// Title and border are handled by the pane container (Frame)
+	p.View.SetTitle("").SetBorder(false)
 	p.View.SetScrollable(true)
 	p.View.SetDynamicColors(true)
 	p.View.SetWrap(false)
 	p.View.SetChangedFunc(func() {
-		if p.Follow {
-			p.View.ScrollToEnd()
-		}
-		app.Draw()
+		app.QueueUpdateDraw(func() {
+			if p.Follow {
+				p.View.ScrollToEnd()
+			}
+		})
 	})
 
 	cmd := exec.Command(argv[0], argv[1:]...)
@@ -121,10 +133,38 @@ func startProc(app *tview.Application, p *Proc, argv ...string) error {
 // Build a vertical layout with one pane per process.
 func buildMainArea(procs []*Proc) *tview.Flex {
 	flex := tview.NewFlex().SetDirection(tview.FlexRow)
-	for _, p := range procs {
-		flex.AddItem(p.View, 0, 1, false)
+	for i, p := range procs {
+		if useDividers && i > 0 {
+			// Add a one-line spacer between panes (no border, draws nothing)
+			flex.AddItem(tview.NewBox(), 1, 0, false)
+		}
+		// If a container frame exists, use it; else fall back to the view
+		if p.Container != nil {
+			flex.AddItem(p.Container, 0, 1, false)
+		} else {
+			flex.AddItem(p.View, 0, 1, false)
+		}
 	}
 	return flex
+}
+
+// Render the header with dynamic status indicators.
+func renderHeader(header *tview.TextView, app *tview.Application, procs []*Proc) {
+	idx := focusedProcIndex(app, procs)
+	focusedName := "-"
+	followState := "-"
+	if idx >= 0 {
+		focusedName = procs[idx].Name
+		if procs[idx].Follow {
+			followState = "on"
+		} else {
+			followState = "off"
+		}
+	}
+	header.SetText(fmt.Sprintf(
+		"devmux — q: quit · TAB: focus · f: follow(%s) · r: reload · g/G: top/bottom · J/K: move pane · focus: %s",
+		followState, focusedName,
+	))
 }
 
 func makeProcsFromSpecs(specs []procSpec) ([]*Proc, [][]string) {
@@ -136,11 +176,19 @@ func makeProcsFromSpecs(specs []procSpec) ([]*Proc, [][]string) {
 			follow = *s.Follow
 		}
 		tv := tview.NewTextView()
-		p := &Proc{Name: s.Name, Dir: s.Dir, View: tv, Follow: follow}
+		frame := tview.NewFrame(tv)
+		frame.SetBorder(useBorders)
+		if useBorders {
+			frame.SetTitle(s.Name)
+		} else {
+			frame.SetTitle("")
+		}
+		p := &Proc{Name: s.Name, Dir: s.Dir, View: tv, Container: frame, Follow: follow}
 		procs = append(procs, p)
 		args := make([]string, 0, 1+len(s.Args))
 		args = append(args, s.Cmd)
 		args = append(args, s.Args...)
+		p.Argv = args
 		argvs = append(argvs, args)
 	}
 	return procs, argvs
@@ -191,20 +239,56 @@ func killTree(p *Proc, sig syscall.Signal) {
 	}
 }
 
+// reloadProc terminates the current process and restarts it using the
+// original argv captured for the Proc.
+func reloadProc(app *tview.Application, p *Proc) {
+	if p == nil {
+		return
+	}
+	if len(p.Argv) == 0 {
+		fmt.Fprintf(p.View, "\n[%s] reload: no argv to start\n", p.Name)
+		return
+	}
+
+	// Attempt graceful stop
+	if p.Cmd != nil && p.Cmd.Process != nil {
+		fmt.Fprintf(p.View, "\n[%s] reload: sending SIGTERM...\n", p.Name)
+		killTree(p, syscall.SIGTERM)
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if p.Cmd.ProcessState != nil {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if p.Cmd.ProcessState == nil {
+			fmt.Fprintf(p.View, "[%s] reload: forcing SIGKILL...\n", p.Name)
+			killTree(p, syscall.SIGKILL)
+			time.Sleep(150 * time.Millisecond)
+		}
+	}
+
+	fmt.Fprintf(p.View, "[%s] reload: starting...\n", p.Name)
+	_ = startProc(app, p, p.Argv...)
+}
+
 func main() {
 	app := tview.NewApplication()
 
 	header := tview.NewTextView().
-		SetText("devmux — q: quit · TAB: focus · f: follow · g/G: top/bottom · J/K: move pane").
 		SetDynamicColors(true)
 
-	specs, err := loadProcSpecs()
-	if err != nil || len(specs) == 0 {
+	cfg, err := loadConfig()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "procs.json not found or invalid. Please create it and retry.")
 		return
 	}
-	procs, argvs := makeProcsFromSpecs(specs)
+	useBorders = cfg.Borders
+	useDividers = cfg.Dividers
+
+	procs, argvs := makeProcsFromSpecs(cfg.Processes)
 	mainArea := buildMainArea(procs)
+	renderHeader(header, app, procs)
 
 	root := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(header, 1, 0, false).
@@ -218,6 +302,7 @@ func main() {
 				next := (idx + 1) % len(procs)
 				app.SetFocus(procs[next].View)
 			}
+			renderHeader(header, app, procs)
 			return nil
 		case tcell.KeyCtrlL:
 			idx := focusedProcIndex(app, procs)
@@ -238,7 +323,48 @@ func main() {
 			if idx >= 0 {
 				procs[idx].Follow = !procs[idx].Follow
 			}
+			renderHeader(header, app, procs)
 			return nil
+		case 'r':
+			idx := focusedProcIndex(app, procs)
+			if idx >= 0 {
+				reloadProc(app, procs[idx])
+			}
+			return nil
+		// case 'b': // toggle borders
+		// 	useBorders = !useBorders
+		// 	app.QueueUpdateDraw(func() {
+		// 		for _, p := range procs {
+		// 			if p.Container != nil {
+		// 				p.Container.SetBorder(useBorders)
+		// 				if useBorders {
+		// 					p.Container.SetTitle(p.Name)
+		// 				} else {
+		// 					p.Container.SetTitle("")
+		// 				}
+		// 			} else {
+		// 				p.View.SetBorder(useBorders)
+		// 				if useBorders {
+		// 					p.View.SetTitle(p.Name)
+		// 				} else {
+		// 					p.View.SetTitle("")
+		// 				}
+		// 			}
+		// 		}
+		// 	})
+		// 	renderHeader(header, app, procs)
+		// 	return nil
+		// case 'd': // toggle dividers
+		// 	useDividers = !useDividers
+		// 	app.QueueUpdateDraw(func() {
+		// 		mainArea = buildMainArea(procs)
+		// 		root = tview.NewFlex().SetDirection(tview.FlexRow).
+		// 			AddItem(header, 1, 0, false).
+		// 			AddItem(mainArea, 0, 1, true)
+		// 		_ = app.SetRoot(root, true)
+		// 	})
+		// 	renderHeader(header, app, procs)
+		// 	return nil
 		case 'g':
 			idx := focusedProcIndex(app, procs)
 			if idx >= 0 {
@@ -261,6 +387,7 @@ func main() {
 					AddItem(mainArea, 0, 1, true)
 				_ = app.SetRoot(root, true)
 				app.SetFocus(procs[idx+1].View)
+				renderHeader(header, app, procs)
 			}
 			return nil
 		case 'K': // move pane up
@@ -273,6 +400,7 @@ func main() {
 					AddItem(mainArea, 0, 1, true)
 				_ = app.SetRoot(root, true)
 				app.SetFocus(procs[idx-1].View)
+				renderHeader(header, app, procs)
 			}
 			return nil
 		}

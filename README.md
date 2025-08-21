@@ -10,6 +10,7 @@ Small, single-binary TUI process multiplexer for local development. Point it at 
 - **Reorder on the fly**: move panes up/down to keep important ones together
 - **Graceful shutdown**: sends SIGTERM to full process groups (POSIX), then SIGKILL after a grace period
 - **Works on macOS/Linux/Windows** (process-group semantics vary on Windows)
+- **Copy-friendly UI**: borderless panes by default with optional one-line dividers
 
 ### Quick start
 
@@ -76,6 +77,7 @@ Example:
 - **Ctrl-L**: clear the focused pane
 - **q / Q / Ctrl-C**: quit devmux
 - **f**: toggle follow (auto-scroll) for focused pane
+- **r**: reload focused process (SIGTERM → SIGKILL, then restart)
 - **g**: scroll to top for focused pane
 - **G**: scroll to bottom for focused pane
 - **J**: move focused pane down
@@ -87,6 +89,8 @@ Mouse support is enabled for convenience.
 
 - **Color output**: devmux sets `FORCE_COLOR=1`, `CLICOLOR=1`, `CLICOLOR_FORCE=1`, and `TERM=xterm-256color` for spawned processes to encourage colorized output.
 - **Startup**: processes are launched shortly after the UI initializes so panes are ready to receive output immediately.
+- **Header indicators**: the top status line shows the focused pane name and the current states of follow, borders, and dividers.
+- **Borders/Dividers**: panes start borderless with a single-line divider between them to keep clipboard copies clean in tmux; toggle with `b` and `d`.
 - **Shutdown**:
   - POSIX (macOS/Linux): sends signals to the child process group (SIGTERM, then SIGKILL after ~2s)
   - Windows: falls back to killing the child process
